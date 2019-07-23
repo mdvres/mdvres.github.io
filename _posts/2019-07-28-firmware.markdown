@@ -1,0 +1,113 @@
+---
+layout: post
+title:  "Introduction to Modem Firmware Analysis"
+---
+
+# Introduction to Modem Firmware Analysis
+<br>
+In this blog-post, we will cover how to start digging firmware to find very common security bugs. I hope this blog-post start a new "firmware analysis" series. In this very first blog-post of this series, we will just start with extracting and analyzing files to find that common bugs. Next posts of this series -I hope- we will cover binary bugs like bof, format string, etc.
+
+I will use PentesterAcademy's AttackDefense Labs for firmwares. But you can also use any modem firmware to reproduce because these bugs are very common as I said. You can use <b><u>almost</u></b> all of these techniques below to analyse any modem firmware. If you want to quickly check how to start firmware analysis 101 please click [here](https://unl1nk.github.io/blog/2018/09/22/f-analizi-1.html) to go my blogpost on an intro to firmware analysis (Turkish).
+
+
+### Investigating For Weak Root Password
+
+This is the most vulnerability bug in the modem firmwares. 
+Quickly check our firmware with ```binwalk``` to understand what it includes.
+
+![image-title-here](/photos/firmware/squashfs_filesystem.png){:class="c-article__main"}
+
+It includes very common file system: Squashfs. If we check ```binwalk``` help page we will see ```-e``` option which is extract firmware for us. So, we can use this option to extract that Squashfs filesystem. 
+
+![image-title-here](/photos/firmware/extracted_filesystem.png){:class="c-article__main"}
+
+As you can see we extracted the squashfs file system from firmware with command ```binwalk -e firmware.bin```. It's simple as that. But sometimes you may face with complicated cases. We will cover those advanced cases in next posts. However, let's continue.
+
+After extracting the filesystem, our first target is finding the root user's password. The easiest way to do this is checking passwd and shadow files in <b>/etc</b> directory.
+
+Let's dive into etc directory and try to read passwd and shadow files. Quick tip: passwd file contains users in Linux system and shadow file contains password hashes of these users of that Linux system. 
+
+![image-title-here](/photos/firmware/shadow_n_passwd.png){:class="c-article__main"}
+We found the root user and root user's password hash. So, we should crack that hash to have clear text of password. 
+
+In this lab, it gives you a wordlist to use with hashcat. So, you can use John or Hashcat. I will go with hashcat.
+
+Here is the command to combine these files to crack hash:
+
+```hashcat -m 1800 -a 0 _firmware.bin.extracted/squashfs-root/etc/shadow 1000000-password-seclists.txt```
+
+And it gives us the password as: q1w2e3r4
+
+That's it. This one was the easiest vulnerability but you can find your very first 0-day just with this technique.
+
+### Investigating For Backdoors in Start-up Sequence
+
+After first part of the post, we will no more do that ```binwalk -e``` thing. Because we accepted that you did the extract part and entered the extracted source of firmware and ready to dig. -Every firmware file will be named as <b>firmware.bin-</b>. 
+
+So, there is a file named <b>rc.local</b> which is exist on <u>almost</u> every Linux system. This file exist in iot devices to do startup things. It contains startup scripts to execute on system start-up ofc. This rc.local file can be abused by attackers for persistency and also can be used for backdooring. 
+
+So, we should definitely check ```rc.local``` files to hunt for simple backdoors easily. Almost every iot device use <b>rc.local</b> to run its startup scripts. 
+
+So, lets check <b>rc.local</b> file to see how it can be abused.
+
+It's placed under /etc directory. 
+
+![image-title-here](/photos/firmware/startup_backdoor.png){:class="c-article__main"}
+
+As you can see screenshot above, it adds user <b>ssl</b> to passwd file and adds hash of this <b>ssl</b> user to shadow file. So attacker will have a user with <b>/bin/bash</b> shell. When iot device starts it add its user. Lets check password of this <b>ssl</b> user. You should make this hash hashcat compatible to crack it with hashcat. 
+
+
+![image-title-here](/photos/firmware/hashcat_compatible.png){:class="c-article__main"}
+You can start cracking with that command:
+
+```hashcat -a 0 -m 1800 rc.local 1000000-password-seclists.txt``` 
+
+After cracking for a while we get password as <b>gandalf</b>.
+
+Sooooo, when device started <b>rc.local</b> file tells device to add a user to system with a name <b>ssl</b> and password <b>gandalf</b>.
+
+
+As you can see rc.local file can be abused like that simple commands. This is the most common way to backdooring a system but also most dummy way to do it because system administrator can notice it easily. 
+
+### Investigating For Backdoors in Network Level
+
+After investigating for backdoors in startup sequence of firmware in this part we will be looking for backdoors on network level. This network level backdoors can be placed with a lot of ways. The most common way is unprotected telnet port, hardcoded telnet password and an access to a port with netcat or nc - ncat. 
+
+So, to investigate that kind of bugs sometimes you need to emulate that firmware and listen for network activities but in this part we do not cover this emulation part in this post. We will go same technique as we did in previous sections.
+
+So, lets check <b>rc.local</b> file to see whats going on while starting iot device. If we can get some clues which process starts or which tasks are performed we can investigate thru this. 
+
+![image-title-here](/photos/firmware/firewalld_network_backdoor.png){:class="c-article__main"}
+In this underlined line, we can clearly see it tries to execute a start/stop script from <b>init.d</b> directory. <b>init.d</b> directory is very important directory for *nix systems. It contains start/stop scripts. So, our <b>rc.local</b> contains that line to start that <b>firewalld</b> script in startup. 
+
+Lets dig that <b>firewalld</b> script to understand what it really does. 
+
+
+![image-title-here](/photos/firmware/netcat_base64.png){:class="c-article__main"}
+When we check that script we clearly see a Base64 encoded string. And it executes that Base64 encoded string. When we decode this Base64
+
+![image-title-here](/photos/firmware/decoded_base64.png){:class="c-article__main"}
+its so obvious that it opens access for attacker in port 4763 to let attacker run any commands. Thats it. Network backdoors are that simple and lethal.
+
+
+### Investigating For Hardcoded SSH Keys and UI Backdoors
+
+This section is the last section of the article. After that section you will be faced with my personal opinions and boring last words. 
+
+Lets hunt for some SSH keys then. When we check for SSH we can clearly see that modem is using Dropbear. Dropbear service has <b>authorized keys</b> in <b>/etc/dropbear/authorized_keys</b> 
+
+
+![image-title-here](/photos/firmware/dropbear_authkey.png){:class="c-article__main"}
+We can make a quick Google search for any leaked private key. 
+
+![image-title-here](/photos/firmware/leaked_privkey.png){:class="c-article__main"}
+Easily found. Attacker can gain access to modem with this private key easily.
+
+
+
+Our last bug is on UI side of modem. When we check web login scripts etc. we can clearly see modem gives  attacker a chance to enter with a specifig <b>USER AGENT</b> string. When we check <b>usr/lib/lua/lua/luci/sys.lua</b> file we saw that part of code:
+
+![image-title-here](/photos/firmware/ui_backdoor.png){:class="c-article__main"}
+We can clearly understand that if we provide <b>"d2232efc39984c22710bfe6c7fee046f"</b> string as a USER AGENT while login sequence, we can login without providing any credentials. 
+
+
